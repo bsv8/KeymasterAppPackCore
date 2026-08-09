@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "publisherPublicKey": "0284bf7562262bbd6940085748f3be6afa52ae317155181ece31b66351ccffa4b0",
+  "app": {
+    "id": "vite-fixture",
+    "name": "Vite Fixture"
+  },
+  "signature": "6b4f0ff133164bdbeba45981b0fb31bc94093b67b47f3dc28cf3b55b1105f26033068b93b5829240b12e6d0bd4ef061b7ff49faa1845a8c81887dc92f2c16fcf"
+}

@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm typecheck
+      - run: pnpm lint
+      - run: pnpm format:check
+      - run: pnpm test
+      - name: Scan for private key material
+        shell: bash
+        run: |
+          if rg -n --hidden --glob '!node_modules/**' --glob '!dist/**' --glob '!*.map' \
+            'BEGIN (RSA|EC|OPENSSH|PRIVATE) KEY|[5KL][1-9A-HJ-NP-Za-km-z]{50,51}' .; then
+            echo "private key material detected"
+            exit 1
+          fi
+      - run: pnpm --filter @keymaster-app-pack/core build
+      - run: pnpm --filter @keymaster-app-pack/vite-plugin build
+      - run: pnpm --filter @keymaster-app-pack/cli build
+      - run: pnpm --filter @keymaster-app-pack/vite-react-fixture build
+      - run: pnpm --filter @keymaster-app-pack/core pack --dry-run
+      - run: pnpm --filter @keymaster-app-pack/vite-plugin pack --dry-run
+      - run: pnpm --filter @keymaster-app-pack/cli pack --dry-run

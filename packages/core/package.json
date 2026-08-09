@@ -1,0 +1,27 @@
+{
+  "name": "@keymaster-app-pack/core",
+  "version": "0.1.0",
+  "description": "Keymaster App Pack V1 format, signing and deployment verification core",
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@noble/curves": "^2.3.0",
+    "@noble/hashes": "^2.0.1",
+    "masterseed": "^1.0.0"
+  }
+}

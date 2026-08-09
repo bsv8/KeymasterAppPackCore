@@ -1,0 +1,7 @@
+packages:
+  - packages/*
+  - examples/*
+allowBuilds:
+  esbuild: set this to true or false
+minimumReleaseAgeExclude:
+  - masterseed@1.0.0
