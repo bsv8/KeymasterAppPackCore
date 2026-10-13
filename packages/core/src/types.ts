@@ -1,17 +1,19 @@
-export interface AppIdentityPayloadV1 {
+export interface AppMetadataV1 {
   version: 1;
   publisherPublicKey: string;
-  app: {
-    id: string;
-    name: string;
-  };
+  app: { id: string; name: string; description: string };
+  requirements: AppRequirementV1[];
 }
+
+export interface AppIdentityPayloadV1 extends AppMetadataV1 {}
 
 export interface AppIdentityProofV1 extends AppIdentityPayloadV1 {
   signature: string;
 }
 
-export interface KeymasterAppManifestV1 extends AppIdentityPayloadV1 {
+export type AppRequirementV1 = "private-key" | "storage";
+
+export interface KeymasterAppManifestV1 extends AppMetadataV1 {
   identitySignature: string;
   index: string;
   files: Record<string, string>;

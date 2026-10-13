@@ -1,63 +1,136 @@
-# 公共 API 与发布流程
+# Keymaster App Pack API
 
-## Core
+## Core metadata
 
-`@keymaster-app-pack/core` 提供：
-
-- `jcs`、`parseStrictJson`：RFC 8785 风格规范 JSON 和拒绝重复 key 的解析；
-- `signIdentityProof`、`verifyIdentityProof`、`encodeIdentityProof`、`decodeIdentityProof`；
-- `bundleSigningDigest`、`signBundleManifest`、`verifyBundleSignature`；
-- `seedHashBytes`、`seedHashFile`、`hashBundleFiles`；
-- `verifyDeployment`：验证目录并返回 `DeploymentRecordV1`；
-- `createBundleGraph`、`stableDependencyOrder`：稳定依赖顺序和循环报告；
-- `injectIdentityMeta`、`extractIdentityProof`：不执行脚本的入口 Identity 处理。
-
-Core 只接受 `PublisherSigner` 的公开能力：
+`AppMetadataV1` 是从构建后入口 HTML 派生的公开数据：
 
 ```ts
-interface PublisherSigner {
-  getPublicKey(): Promise<string>;
-  signDigest(digest32: Uint8Array): Promise<Uint8Array>;
+interface AppMetadataV1 {
+  version: 1;
+  publisherPublicKey: string;
+  app: {
+    id: string;
+    name: string;
+    description: string;
+  };
+  requirements: Array<"private-key" | "storage">;
 }
 ```
 
-## Vite
+主要 API：
+
+- `extractAppMetadata(html)`：读取并严格校验唯一的 HTML meta 真值；
+- `validateAppMetadata(value)`：校验派生 JSON 或本地导入数据；
+- `metadataJson(value)`：输出固定字段的 metadata；
+- `identityProofJson(value)`：输出项目根使用的 flat identity proof JSON；
+- `extractAppIdentityProof(html)` / `assertIdentityProof(proof)`：要求并校验 HTML 身份签名；
+- `metadataFromManifest(manifest)`：从 Bundle Manifest 投影 App metadata。
+
+未知 `keymaster-app:*` meta、重复字段、未知或乱序 requirement、无效 secp256k1
+公钥都会失败。
+
+## Vite 插件
 
 ```ts
-import keymasterVite from "@keymaster-app-pack/vite-plugin";
-import identity from "./keymaster.identity.json" with { type: "json" };
+import { defineConfig } from "vite";
+import { keymasterVite } from "@keymaster-app-pack/vite-plugin";
 
-export default { plugins: [keymasterVite({ identity })] };
+export default defineConfig({
+  plugins: [keymasterVite()],
+});
 ```
 
-插件在 `transformIndexHtml` 注入 Identity，在 `generateBundle` 根据 Rollup/Rolldown 图处理 HTML、CSS、静态和动态 ESM 引用，并通过 `emitFile` 输出内容寻址文件。
+常用选项：
 
-`generateBundle` 只生成 `bundleSignature: ""` 的 unsigned Manifest；签名必须在构建后由 CLI/Signer 完成。
+- `entryLogicalPath`：入口逻辑路径，默认 `index.html`；
+- `strictExternal`：拒绝未内容寻址的外部引用；
+- `includeSourceMaps`：把 source map 纳入内容寻址文件；
+- `atomicOutput`：是否使用 staging 目录，默认启用；
+- `replaceExisting`：是否允许替换已有输出目录，默认不允许。
 
-插件默认把产物写入目标目录旁的随机 staging 目录，并将最终化 hook 追加到已解析的用户插件队列末端；其他插件的 `writeBundle`/`closeBundle` 失败时也会清理 staging。已有目标目录必须显式设置 `replaceExisting: true` 才允许替换。`atomicOutput: false` 可关闭插件 staging。正式发布仍应使用 CLI 的外层 staging 完成签名和最终回滚；直接 Vite 构建仅作为 unsigned 中间产物。启用 `build.sourcemap` 时必须同时设置 `includeSourceMaps: true`，插件会将 `sourceMappingURL` 改写为对应 Seed Hash 的相对 URL。
+插件在 `generateBundle` 阶段读取已经过 Vite 变换和引用重写的入口 HTML，输出
+内容寻址文件和 `bundleSignature` 为空的 `.keymaster.json`；其中
+`identitySignature` 已从 HTML proof 读取并完成验证。插件不生成
+`keymaster.app.json`；输入产物
+不得预先包含 `.keymaster.json` 或 `keymaster.app.json` 这两个保留文件名。
+
+## 项目 metadata CLI
+
+`keymaster.app.json` 是项目根文件，不是 build、dist 或 deployment 文件。使用以下
+命令从项目 HTML 生成它（默认读取 cwd/index.html，路径相对 cwd 解析）：
+
+```sh
+keymaster-app app sign --publisher publisher
+keymaster-app app sign --publisher publisher --input src/index.html
+keymaster-app app create
+keymaster-app app create --input src/index.html --out keymaster.app.json --replace
+```
+
+`app sign` 必须指定 publisher alias，只输出 `{publisher,publisherPublicKey,signature,meta}`
+机器 JSON（`meta` 是唯一的 `<meta name="keymaster-app:identity-signature" content="...">` 字符串），不写入 HTML。`app create` 要求 HTML 已有有效 signature，默认读取
+cwd/index.html、写项目根 `keymaster.app.json`，只接受 `--input`、`--out`、`--replace`；
+默认拒绝覆盖，且不读取 signer 环境、不修改 HTML、不会自动创建父目录。
+
+## Bundle Manifest 与签名
+
+`KeymasterAppManifestV1` 在 `AppMetadataV1` 后增加：
+
+```ts
+interface KeymasterAppManifestV1 extends AppMetadataV1 {
+  identitySignature: string;
+  index: string;
+  files: Record<string, string>;
+  bundleSignature: string;
+}
+```
+
+主要 API：
+
+- `validateManifest`、`manifestJson`；
+- `bundleSigningBytes`、`bundleSigningDigest`；
+- `signBundleManifest`、`verifyBundleSignature`；
+- `verifyDeployment`、`writeHashedBundle`。
+
+Bundle 签名域为 `keymaster-app-bundle:v1`。签名 payload 是删除
+`bundleSignature` 后的完整 Manifest，使用 JCS 编码。`signBundleManifest` 会先检查
+signer 公钥等于 metadata 中的 Publisher 公钥。
 
 ## CLI
 
-```text
-keymaster-app identity sign --config keymaster.identity.json --key publisher
+```sh
+export KEYMASTER_PUBLISHER_KEY_DIR=/secure/keymaster-publishers
+export KEYMASTER_PUBLISHER_KEY_PASSWORD='...'
+keymaster-app publisher create publisher
+keymaster-app publisher list
 keymaster-app bundle sign dist/.keymaster.json --key publisher
 keymaster-app verify dist
-keymaster-app build --key publisher -- --outDir dist --replace
+keymaster-app build --key publisher -- --outDir dist
 ```
 
-`build` 先写入同级随机 staging 目录，完成 unsigned 验证、签名和 signed 验证后再发布。替换已有目录必须显式传 `--replace`；签名失败时旧目录保持不变。
+CLI 不接受私钥命令行参数。`publisher create <name>` 生成随机 secp256k1
+密钥并保存为目录中的 `<name>.publisher.key`；`publisher list` 只读取公开部分，
+不需要密码。内置加密文件 signer 从以下环境变量读取：
 
-默认 signer provider 从项目外的加密 key 文件读取：
-
-```text
-KEYMASTER_PUBLISHER_KEY_FILE=/secure/path/publisher.key
-KEYMASTER_PUBLISHER_KEY_PASSWORD=...
+```sh
+KEYMASTER_PUBLISHER_KEY_DIR=/secure/keymaster-publishers
+KEYMASTER_PUBLISHER_KEY_PASSWORD='...'
 ```
 
-## Deployment verifier
+`--key <name>` 在该目录中定位对应 Publisher 文件。目录必须专用并显式提供，文件
+采用 0600 权限；create 不覆盖同名文件，list 遇到损坏或未知文件直接失败。
 
-```ts
-const record = await verifyDeployment("dist");
-```
+`bundle sign` 会先以 unsigned 模式完整验包，再签名并原子替换 Manifest；
+`build` 使用 staging 目录执行 Vite、签名、再次验包，全部成功后才发布输出目录。
 
-验证器默认要求 Bundle 签名、严格文件集合、所有物理文件 Seed Hash、入口 Identity 与 Manifest 全部匹配。构建中间状态可显式使用 `{ allowUnsigned: true }`，不应把该选项用于生产入口。
+## 部署验证
+
+`verifyDeployment(directory)` 默认要求：
+
+1. Bundle 签名有效；
+2. 所有物理文件名和内容 Seed Hash 一致；
+3. `index` 唯一对应一个 HTML 逻辑入口；
+4. HTML meta 与 `.keymaster.json` metadata 完全一致；
+5. 没有未声明文件或同一 Hash 的 MIME 冲突（部署目录中的 `keymaster.app.json`
+   属于未声明文件）。
+
+`allowUnsigned: true` 只用于构建和签名前的中间状态，不得用于生产验收。

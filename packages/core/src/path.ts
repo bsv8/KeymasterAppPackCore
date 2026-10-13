@@ -31,7 +31,7 @@ export function validateLogicalPath(value: unknown): asserts value is string {
       { value },
     );
   }
-  if (value === ".keymaster.json" || value.startsWith(".keymaster.json/")) {
+  if (value === ".keymaster.json" || value.startsWith(".keymaster.json/") || value === "keymaster.app.json" || value.startsWith("keymaster.app.json/")) {
     throw new KeymasterError(ERROR_CODES.LOGICAL_PATH_INVALID, "logical path is reserved", {
       value,
     });

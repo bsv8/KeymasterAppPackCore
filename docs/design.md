@@ -1,402 +1,123 @@
-# Keymaster App Pack Core 设计文档
+# Keymaster App Pack 设计
 
-## 1. 文档目的
+## 1. 目标
 
-本文定义 Keymaster App Manifest V1、两层签名、内容寻址 Bundle、Vite 适配、CLI/Signer 和部署验证的规范性设计。需求见[需求文档](./requirements.md)，实现顺序见[施工单](./implementation-plan.md)。
+App Pack 解决两个彼此独立的问题：
 
-## 2. 总体架构
+1. 把 Web App 构建产物转换成可验证的内容寻址文件；
+2. 生成一份便于人工导入 Keymaster 的公开 App metadata。
 
-```text
-App source + public Identity Proof
-                 │
-                 ▼
-              Vite build
-                 │ Rollup OutputBundle
-                 ▼
-       @keymaster-app-pack/vite
-       - 注入 Identity
-       - 建依赖图
-       - 重写引用
-       - MasterSeed Hash 命名
-       - 生成 unsigned manifest
-                 │
-                 ▼
-        keymaster-app CLI/Signer
-        - 调受控 PublisherSigner
-        - 写 bundleSignature
-        - 最终 verify
-                 │
-                 ▼
- dist/[seedHash] + dist/.keymaster.json
-                 │
-                 ▼
-        Deployment Verifier
-        - 验签/重算 Hash
-        - 导入 index/MIME 映射
-```
+系统保留两种职责不同的签名：Identity 签名认证稳定 App identity 与 requirements，
+Bundle 签名认证一次具体构建。`keymaster.app.json` 包含 Identity proof，但没有额外的
+文件外层签名。
 
-建议仓库布局：
+## 2. 真值与派生关系
 
 ```text
-packages/
-  core/          Manifest、JCS、签名正文、路径、依赖图、验证模型
-  vite-plugin/   Vite/Rollup adapter
-  cli/           build/sign/verify 与 signer adapters
-examples/
-  vite-react/
-docs/
+源码/项目 index.html meta ─────► app sign 输出 identity-signature
+        │                         │ 发行人手工写回 HTML
+        │                         ▼
+        ├───────────────────────► 项目根 keymaster.app.json
+        │                         flat proof、人工导入 catalog
+        │ Vite 构建、引用重写、Hash
+        ▼
+构建后入口 HTML ───────────────► .keymaster.json
+        proof + index + files + bundleSignature
 ```
 
-包名可在实现前确定；格式字符串与 JSON 字段一旦发布不得随包名变化。
+源码 `index.html` meta 是唯一手写真值。`keymaster.app.json` 由
+`keymaster-app app create` 写在项目根目录，供人工导入；Vite 构建只生成部署所需
+的 `.keymaster.json`，禁止把项目 JSON 复制进 `dist`。禁止从 JSON 或 Vite 配置反向
+注入 HTML；部署验证器只比较 HTML 与 `.keymaster.json`，不读取项目文件。
 
-## 3. MasterSeed 依赖
-
-最终文件名使用 MasterSeed Seed V1 的 `seed_hash` 小写 hex，而不是直接对源文件做一次 SHA-256：
-
-```text
-block_hash[i] = SHA256(file block i, block size = 524288)
-seed_bytes    = block_hash[0] || ... || block_hash[n-1]
-seed_hash     = SHA256(seed_bytes)
-filename      = lowercaseHex(seed_hash)
-```
-
-TypeScript 实现依赖 `masterseed` / `masterseed/node`，不得复制算法。`.seed` 文件不进入 App dist；打包和部署完整验证可在流式计算中临时生成 seed bytes 或直接使用 sink 计算结果。
-
-## 4. 规范编码
-
-### 4.1 Hex
-
-- 公钥：66 字符小写 hex，首字节 `02` 或 `03`。
-- Seed Hash：64 字符小写 hex。
-- compact signature：128 字符小写 hex，布局 `r || s`。
-- 禁止 `0x`、空白、分隔符和大小写混用。
-
-### 4.2 JSON
-
-- 规范化采用 RFC 8785 JCS。
-- 解析器必须拒绝重复 member name；不能先用会覆盖重复 key 的普通解析器完成安全校验。
-- `files` 在源 JSON 中可任意排序，签名时由 JCS 排序。
-- 不执行 Unicode 自动 normalization；签名按 JSON string 的确切 Unicode scalar value。
-
-### 4.3 Domain Separation
-
-```text
-identitySigningBytes =
-  UTF8("keymaster-app-identity:v1") || 0x00 || UTF8(JCS(identityPayload))
-
-bundleSigningBytes =
-  UTF8("keymaster-app-bundle:v1") || 0x00 || UTF8(JCS(bundlePayload))
-
-digest = SHA256(signingBytes)
-```
-
-签名算法固定 secp256k1 compact 64-byte；V1 JSON 不重复写 algorithm/format。
-
-## 5. App Identity
-
-### 5.1 Payload
-
-```ts
-interface AppIdentityPayloadV1 {
-  version: 1;
-  publisherPublicKey: string;
-  app: {
-    id: string;
-    name: string;
-  };
-}
-
-interface AppIdentityProofV1 extends AppIdentityPayloadV1 {
-  signature: string;
-}
-```
-
-`app.id` 规则：
-
-```regex
-^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$
-```
-
-`app.name`：去除首尾空白后非空，最大 120 Unicode code points，不允许控制字符。
-
-Identity Proof 是公开发布凭证，建议提交到 App 仓库：
-
-```text
-keymaster.identity.json
-```
-
-修改 `app.id`、`app.name` 或 Publisher Key 必须重新签署身份。`app.id` 或 Publisher Key 改变会改变 Keymaster Storage namespace。
-
-### 5.2 HTML 嵌入
-
-规范载荷：
-
-```text
-encodedIdentity = base64url(UTF8(JCS(identityProof)))
-```
-
-入口 HTML：
+## 3. HTML meta
 
 ```html
-<meta name="keymaster-app-identity" content="encodedIdentity" />
+<meta name="keymaster-app:id" content="example-app">
+<meta name="keymaster-app:publisher-public-key" content="03...">
+<meta name="keymaster-app:name" content="Example App">
+<meta name="keymaster-app:description" content="Example description">
+<meta name="keymaster-app:requirement" content="private-key">
+<meta name="keymaster-app:requirement" content="storage">
+<meta name="keymaster-app:identity-signature" content="...">
 ```
 
-必须恰好存在一个该 meta。重复、空值、base64url 非规范或解码后不等于 JCS 的情况均失败。
+- 四个单值字段必须各出现一次；
+- requirement 可出现零次或多次，但必须字典序排列且不得重复；
+- V1 只认识 `private-key`、`storage`，未知值失败；
+- App id 是稳定 namespace，不使用部署 origin 代替；
+- Publisher 公钥必须是有效的 compressed secp256k1 小写 hex。
+- identity-signature 必须是 `app sign` 对完整 metadata payload 生成的有效
+  64-byte compact secp256k1 签名。
 
-## 6. Bundle Manifest
-
-```ts
-interface KeymasterAppManifestV1 {
-  version: 1;
-  publisherPublicKey: string;
-  app: {
-    id: string;
-    name: string;
-  };
-  identitySignature: string;
-  index: string;
-  files: Record<string, string>;
-  bundleSignature: string;
-}
-```
-
-示例：
+## 4. 派生 App metadata
 
 ```json
 {
   "version": 1,
-  "publisherPublicKey": "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "publisherPublicKey": "03...",
   "app": {
-    "id": "s3disk",
-    "name": "S3Disk"
+    "id": "example-app",
+    "name": "Example App",
+    "description": "Example description"
   },
-  "identitySignature": "0123456789abcdef...",
-  "index": "56b3320e...",
-  "files": {
-    "index.html": "56b3320e...",
-    "assets/app.js": "2cf24dba...",
-    "assets/style.css": "9f86d081...",
-    "favicon.svg": "a665a459..."
-  },
-  "bundleSignature": "abcdef0123456789..."
+  "requirements": ["private-key", "storage"],
+  "signature": "..."
 }
 ```
 
-Bundle Payload 是删除 `bundleSignature` 后的完整对象。Identity 字段必须与已验证 Identity Proof 完全相同：
+文件不包含 origin、URL、icon 或 launch；它包含 identity proof signature。部署位置由 Keymaster 自己的
+本地 catalog 管理；任意部署者都可以镜像同一 App。
+
+这份 JSON 是项目数据交接格式，也是 HTML 中同一份 `AppIdentityProof` 的 flat JSON
+投影。Keymaster 把它人工纳入本地 catalog 后先验签，再用于 requirements 门禁和
+Storage namespace；具体部署包的真实性来自独立 Bundle 签名。
+
+## 5. 内容寻址
+
+Vite adapter 根据 Rollup/Rolldown 图稳定处理依赖，从叶节点向入口替换 HTML、
+CSS、静态与动态 ESM 引用。每个最终文件使用 MasterSeed Seed V1 Hash 命名；入口
+最终 Hash 写入 Manifest `index`。
+
+`.keymaster.json` 是部署控制文件，不进入 `files`，避免自引用；它是部署目录唯一
+允许的控制 JSON。`keymaster.app.json` 仅是项目根文件，输入 bundle、publicDir 或
+逻辑文件一律不得占用该名称，以免泄漏到部署目录。
+
+## 6. Bundle 签名
+
+Manifest 结构是 App metadata 加 `identitySignature`、`index`、`files`、
+`bundleSignature`。
+签名字节：
 
 ```text
-version
-publisherPublicKey
-app
-identitySignature = identityProof.signature
+UTF8("keymaster-app-bundle:v1")
+  || 0x00
+  || UTF8(JCS(manifest without bundleSignature))
 ```
 
-## 7. 路径与文件映射
-
-### 7.1 Logical Path
-
-逻辑路径：
-
-- 使用 `/`；
-- 相对于 Bundle 根；
-- 不以 `/` 开头；
-- 不含空段、`.`、`..`、反斜杠、NUL、控制字符；
-- 最大总长 1024 字符，单段最大 255 字符；
-- `.keymaster.json` 为保留名，不得出现在 `files`。
-
-### 7.2 Physical File
-
-```text
-physicalPath = dist + "/" + files[logicalPath]
-```
-
-不同 logical path 指向相同 Seed Hash 时，物理文件只写一次。若同一 Hash 对应不同字节，视为内部完整性错误。
-
-### 7.3 MIME
-
-Manifest 保留 logical path 以便部署服务按扩展名推导 Content-Type。验证输出：
-
-```ts
-interface DeploymentRecordV1 {
-  publisherPublicKey: string;
-  appId: string;
-  appName: string;
-  indexHash: string;
-  filesByHash: Record<
-    string,
-    {
-      logicalPaths: string[];
-      contentType: string;
-    }
-  >;
-}
-```
-
-未知扩展名使用 `application/octet-stream`。入口必须为 `text/html; charset=utf-8`。
-
-## 8. Vite 插件生命周期
-
-### 8.1 Config
-
-插件强制或校验：
-
-- `base` 必须允许生成相对资源引用，推荐 `./`；
-- V1 默认 `build.sourcemap = false`；开启 sourcemap 时必须显式选择纳入 Bundle 或拒绝；
-- 输出先进入 staging directory，不直接覆盖已发布 dist。
-
-### 8.2 `transformIndexHtml`
-
-读取并验证公开 Identity Proof，注入唯一 meta。此阶段不需要私钥。
-
-### 8.3 `generateBundle`
-
-从 `OutputBundle` 收集：
-
-- `OutputChunk.imports`；
-- `OutputChunk.dynamicImports`；
-- `OutputChunk.referencedFiles`；
-- asset 与 HTML/CSS 内已解析引用。
-
-构建 `logicalPath -> dependencies` 图。引用重写必须依据 Bundle 元数据和格式解析器，不允许对任意源代码做宽泛字符串/正则替换。
-
-### 8.4 反向拓扑处理
-
-对 DAG 进行反向拓扑：
-
-1. 叶子 asset：直接 Hash；
-2. CSS：替换已知 asset URL 后 Hash；
-3. JS chunk：替换依赖 chunk/asset URL 后 Hash；
-4. HTML：替换所有入口引用后 Hash；
-5. 生成 `files` 与 `index`。
-
-每步的 Hash 输入必须是最终写盘字节。
-
-### 8.5 循环
-
-若文件级依赖图出现 strongly connected component 且成员多于 1，或单节点自引用：
-
-```text
-KEYMASTER_BUNDLE_CYCLE
-```
-
-错误必须包含稳定的 logical path 环路。V1 不尝试求密码学固定点。调用方应调整 Rollup chunk 策略，把循环模块合并为同一 chunk；未来可另行定义 import-map 扩展。
-
-### 8.6 原子输出
-
-写入流程：
-
-```text
-dist.tmp-[random]/[hash files]
-dist.tmp-[random]/.keymaster.json (bundleSignature="")
-CLI sign + verify
-rename/swap to configured dist
-```
-
-失败时清理 staging，不留下看似完整的目标目录。替换已有 dist 的策略必须显式配置，不能默认递归删除未知目录。
-
-## 9. 引用重写
-
-### 9.1 HTML
-
-使用 HTML parser 修改本地 `src` / `href`。保留 fragment；本地 query 默认拒绝，避免同一内容出现多种寻址。外部 `http(s):`、`data:`、`blob:` 不进入 Bundle；默认警告，strict 模式拒绝。
-
-### 9.2 CSS
-
-使用 CSS parser 处理 `url()` 和 `@import`，不得替换注释或普通字符串。资源不存在时失败。
-
-### 9.3 JavaScript
-
-优先使用 Rollup chunk 元数据定位已生成引用，并使用 magic-string 一类位置安全工具修改。静态 import、dynamic import 与 `import.meta.ROLLUP_FILE_URL_*` 产物都必须覆盖。
-
-### 9.4 Index 最后处理
-
-入口 Identity 已先嵌入；所有资源 Hash 确定后才替换 HTML URL并计算 index Hash。因此 Identity Proof 不含 `files/index`，完整 Bundle 签名不嵌回 index，避免循环。
-
-## 10. CLI 与 Signer
-
-### 10.1 命令
-
-```text
-keymaster-app identity sign --config keymaster.app.json --key <alias>
-keymaster-app bundle sign dist/.keymaster.json --key <alias>
-keymaster-app verify dist
-keymaster-app build --key <alias> -- <vite args...>
-```
-
-`--key` 是公开 alias，不是私钥。禁止 `--private-key`。
-
-### 10.2 Signer Adapter
-
-优先级建议：
-
-1. OS Keychain / hardware signer；
-2. 远程 signing service / KMS；
-3. 项目目录外的密码加密 key file；
-4. CI 临时文件描述符/stdin。
-
-加密 key file 推荐路径：
-
-```text
-~/.config/keymaster-publisher/keys/[publisherPublicKey].key
-```
-
-文件权限 `0600`。MasterSeed 项目不保存 Publisher key。
-
-### 10.3 Bundle Sign
-
-CLI 必须先验证空签名 Manifest、所有文件 Hash 和 Identity，再调用 signer。签名写入临时 `.keymaster.json.tmp`，落盘同步后原子替换。
-
-## 11. Deployment Verifier
-
-严格顺序：
-
-1. 读取 `.keymaster.json`，限制大小；
-2. 拒绝重复 JSON key；
-3. 校验 schema 和规范编码；
-4. 重建并验证 Identity Proof；
-5. 验证 Bundle 签名；
-6. 对 `files` 每个唯一 Hash 检查物理文件存在；
-7. 流式重算 Seed Hash并比较；
-8. 检查没有未声明的公开 Hash 文件（策略可配置，默认 strict）；
-9. 读取 index 文件并提取 Identity meta；
-10. 比较 index Identity 与 Manifest；
-11. 生成 DeploymentRecord；
-12. 部署服务持久化 record、设置 `/` internal rewrite 后，才允许删除 `.keymaster.json`。
-
-## 12. 错误模型
-
-建议稳定 code：
-
-```text
-IDENTITY_INVALID
-IDENTITY_SIGNATURE_INVALID
-MANIFEST_INVALID
-BUNDLE_SIGNATURE_INVALID
-PUBLISHER_KEY_MISMATCH
-LOGICAL_PATH_INVALID
-ENTRY_MISSING
-REFERENCE_MISSING
-BUNDLE_CYCLE
-SEED_HASH_MISMATCH
-UNDECLARED_FILE
-IDENTITY_EMBED_MISMATCH
-SIGNER_UNAVAILABLE
-ATOMIC_WRITE_FAILED
-OPERATION_ABORTED
-```
-
-自然语言 message 不构成兼容协议。
-
-## 13. S3Disk 参考接入
-
-S3Disk 当前为 Vite + React。首个端到端 fixture 应覆盖：
-
-- `index.html`；
-- React JS chunk；
-- CSS；
-- `favicon.svg`；
-- 图片或字体；
-- 本地动态 import fixture；
-- `base: "./"` 下从任意部署前缀加载。
-
-工具只改构建产物，不改变 S3Disk 当前业务源码。S3Disk 后续从直连 S3 迁移到 Keymaster Storage API 属于 `keymaster.cc` 与 S3Disk 的另一阶段。
+对字节做 SHA-256，再用 Publisher secp256k1 私钥生成 64-byte compact 签名。
+签名覆盖 name、description、requirements、Publisher 公钥、入口和完整文件表。
+
+私钥由 `PublisherSigner` 提供；Core 不读取环境变量，CLI provider 才负责从受控
+环境解锁 signer。内置 provider 从显式 `KEYMASTER_PUBLISHER_KEY_DIR` 按
+`<name>.publisher.key` 定位文件，并用 `KEYMASTER_PUBLISHER_KEY_PASSWORD` 解密；
+signer 返回的公钥必须等于 HTML metadata 公钥。`publisher create <name>` 创建新密钥，
+`publisher list` 仅读取并排序公开部分。
+
+## 7. 原子发布
+
+直接 Vite 与 CLI 构建都优先写 staging 目录。只有构建、文件 Hash、metadata
+一致性、签名和最终验包全部成功，才把 staging 原子发布为目标目录。已有目录默认
+拒绝替换；必须显式授权。晚期 bundle/write/close hook 失败时保留旧目录并清理
+staging。
+
+不增加自动重试或部分发布恢复状态机。失败后修正输入并重新运行完整构建，符合系统
+“简单失败、可重新执行”的原则。
+
+## 8. 信任边界
+
+- HTML/JSON 是公开信息，不含私钥；
+- `keymaster.app.json` 可复制，但复制本身不获得签名能力；
+- Bundle 签名认证一个确定构建，不限制谁可以部署相同字节；
+- Keymaster 不应从任意运行中网页接受自报 metadata；它只使用本地人工导入数据；
+- `private-key` 和 `storage` 是运行前置条件，不是授予 App 的权限。

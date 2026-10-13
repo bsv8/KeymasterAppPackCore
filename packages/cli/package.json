@@ -1,7 +1,7 @@
 {
   "name": "@keymaster-app-pack/cli",
   "version": "0.1.0",
-  "description": "Keymaster App identity/bundle signer and deployment CLI",
+  "description": "Keymaster App metadata/bundle signer and deployment CLI",
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "files": [

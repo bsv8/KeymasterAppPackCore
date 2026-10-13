@@ -1,11 +1,10 @@
 import { lstat, readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { ERROR_CODES, KeymasterError, throwIfAborted } from "./errors.js";
+import { extractAppIdentityProof } from "./html.js";
 import { jcs } from "./jcs.js";
-import { extractIdentityProof } from "./html.js";
+import { assertIdentityProof } from "./identity.js";
 import {
-  assertManifestIdentity,
-  manifestIdentityProof,
   validateManifest,
   verifyBundleSignature,
 } from "./manifest.js";
@@ -40,7 +39,6 @@ export async function verifyDeployment(
     );
   }
   const manifest = validateManifest(parseStrictJson(source));
-  assertManifestIdentity(manifest);
   if (!verifyBundleSignature(manifest, options.allowUnsigned === true)) {
     throw new KeymasterError(
       ERROR_CODES.BUNDLE_SIGNATURE_INVALID,
@@ -128,13 +126,31 @@ export async function verifyDeployment(
       error,
     );
   }
-  const embedded = extractIdentityProof(html);
-  if (jcs(embedded) !== jcs(manifestIdentityProof(manifest))) {
+  const embedded = extractAppIdentityProof(html);
+  assertIdentityProof(embedded);
+  const manifestMetadata = {
+    version: manifest.version,
+    publisherPublicKey: manifest.publisherPublicKey,
+    app: manifest.app,
+    requirements: manifest.requirements,
+  };
+  const embeddedMetadata = {
+    version: embedded.version,
+    publisherPublicKey: embedded.publisherPublicKey,
+    app: embedded.app,
+    requirements: embedded.requirements,
+  };
+  if (jcs(embeddedMetadata) !== jcs(manifestMetadata)) {
     throw new KeymasterError(
-      ERROR_CODES.IDENTITY_EMBED_MISMATCH,
-      "entry identity does not match manifest",
+      ERROR_CODES.METADATA_EMBED_MISMATCH,
+      "entry metadata does not match manifest",
     );
   }
+  if (embedded.signature !== manifest.identitySignature)
+    throw new KeymasterError(
+      ERROR_CODES.IDENTITY_SIGNATURE_INVALID,
+      "entry identity signature does not match manifest",
+    );
 
   const filesByHash: DeploymentRecordV1["filesByHash"] = {};
   for (const [logicalPath, hash] of Object.entries(manifest.files)) {

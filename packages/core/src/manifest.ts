@@ -2,15 +2,22 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { ERROR_CODES, KeymasterError } from "./errors.js";
 import { hexToBytes, isLowerHex } from "./encoding.js";
-import { validateIdentityPayload, verifyIdentityProof } from "./identity.js";
+import { validateAppMetadata } from "./metadata.js";
+import { assertIdentityProof, validateIdentityProof } from "./identity.js";
 import { jcs, jcsBytes } from "./jcs.js";
 import { validateLogicalPath } from "./path.js";
-import type {
-  AppIdentityProofV1,
-  BundleSigningPayloadV1,
-  KeymasterAppManifestV1,
-  PublisherSigner,
-} from "./types.js";
+import type { BundleSigningPayloadV1, KeymasterAppManifestV1, PublisherSigner } from "./types.js";
+
+/** 从已校验 manifest 投影 metadata；HTML 才是构建时写入的唯一真值。 */
+export function metadataFromManifest(manifest: KeymasterAppManifestV1) {
+  const value = validateManifest(manifest);
+  return {
+    version: value.version,
+    publisherPublicKey: value.publisherPublicKey,
+    app: value.app,
+    requirements: value.requirements,
+  };
+}
 
 const BUNDLE_DOMAIN = new TextEncoder().encode("keymaster-app-bundle:v1");
 
@@ -30,6 +37,7 @@ export function validateManifest(value: unknown): KeymasterAppManifestV1 {
       "version",
       "publisherPublicKey",
       "app",
+      "requirements",
       "identitySignature",
       "index",
       "files",
@@ -38,11 +46,14 @@ export function validateManifest(value: unknown): KeymasterAppManifestV1 {
   ) {
     throw new KeymasterError(ERROR_CODES.MANIFEST_INVALID, "manifest has unexpected fields");
   }
-  const identity = validateIdentityPayload({
+  const metadata = validateAppMetadata({
     version: object.version,
     publisherPublicKey: object.publisherPublicKey,
     app: object.app,
+    requirements: object.requirements,
   });
+  const identityProof = validateIdentityProof({ ...metadata, signature: object.identitySignature });
+  assertIdentityProof(identityProof);
   if (
     !isLowerHex(object.identitySignature, 64) ||
     !isLowerHex(object.index, 32) ||
@@ -71,31 +82,12 @@ export function validateManifest(value: unknown): KeymasterAppManifestV1 {
     throw new KeymasterError(ERROR_CODES.ENTRY_MISSING, "manifest index is not present in files");
   }
   return {
-    ...identity,
-    identitySignature: object.identitySignature,
+    ...metadata,
+    identitySignature: object.identitySignature as string,
     index: object.index,
     files,
     bundleSignature: object.bundleSignature,
   };
-}
-
-export function manifestIdentityProof(manifest: KeymasterAppManifestV1): AppIdentityProofV1 {
-  const value = validateManifest(manifest);
-  return {
-    version: 1,
-    publisherPublicKey: value.publisherPublicKey,
-    app: value.app,
-    signature: value.identitySignature,
-  };
-}
-
-export function assertManifestIdentity(manifest: KeymasterAppManifestV1): void {
-  const proof = manifestIdentityProof(manifest);
-  if (!verifyIdentityProof(proof))
-    throw new KeymasterError(
-      ERROR_CODES.IDENTITY_SIGNATURE_INVALID,
-      "manifest identity signature verification failed",
-    );
 }
 
 export function bundleSigningPayload(manifest: KeymasterAppManifestV1): BundleSigningPayloadV1 {
@@ -104,6 +96,7 @@ export function bundleSigningPayload(manifest: KeymasterAppManifestV1): BundleSi
     version: value.version,
     publisherPublicKey: value.publisherPublicKey,
     app: value.app,
+    requirements: value.requirements,
     identitySignature: value.identitySignature,
     index: value.index,
     files: value.files,
@@ -127,7 +120,6 @@ export async function signBundleManifest(
   manifest: KeymasterAppManifestV1,
 ): Promise<KeymasterAppManifestV1> {
   const value = validateManifest(manifest);
-  assertManifestIdentity(value);
   const publicKey = await signer.getPublicKey();
   if (publicKey !== value.publisherPublicKey)
     throw new KeymasterError(
@@ -157,11 +149,9 @@ export function verifyBundleSignature(
   allowUnsigned = false,
 ): boolean {
   const value = validateManifest(manifest);
-  assertManifestIdentity(value);
   if (value.bundleSignature === "") return allowUnsigned;
   try {
-    const proof = manifestIdentityProof(value);
-    return secpVerify(value.bundleSignature, bundleSigningDigest(value), proof.publisherPublicKey);
+    return secpVerify(value.bundleSignature, bundleSigningDigest(value), value.publisherPublicKey);
   } catch {
     return false;
   }

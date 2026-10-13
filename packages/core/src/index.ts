@@ -5,6 +5,7 @@ export * from "./strict-json.js";
 export * from "./jcs.js";
 export * from "./path.js";
 export * from "./seed.js";
+export * from "./metadata.js";
 export * from "./identity.js";
 export * from "./manifest.js";
 export * from "./graph.js";

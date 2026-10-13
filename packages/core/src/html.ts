@@ -1,6 +1,7 @@
 import { ERROR_CODES, KeymasterError } from "./errors.js";
-import { decodeIdentityProof, encodeIdentityProof } from "./identity.js";
-import type { AppIdentityProofV1 } from "./types.js";
+import { validateAppMetadata } from "./metadata.js";
+import { assertIdentityProof, validateIdentityProof } from "./identity.js";
+import type { AppIdentityProofV1, AppMetadataV1 } from "./types.js";
 
 interface HtmlTag {
   start: number;
@@ -92,28 +93,84 @@ function findTags(source: string): HtmlTag[] {
   return result;
 }
 
-function isIdentityMeta(tag: HtmlTag): boolean {
-  return (
-    tag.name === "meta" &&
-    tag.attributes.get("name")?.value?.toLowerCase() === "keymaster-app-identity"
+/**
+ * 从入口 HTML 读取唯一 app metadata 真值。
+ * 项目 app JSON 与部署 manifest 都由这组字段派生，避免多个来源分叉。
+ */
+export function extractAppMetadata(html: string): AppMetadataV1 {
+  const tags = findTags(html).filter((tag) => tag.name === "meta");
+  const values = new Map<string, string[]>();
+  for (const tag of tags) {
+    const name = tag.attributes.get("name")?.value?.toLowerCase();
+    if (!name?.startsWith("keymaster-app:")) continue;
+    if (
+      ![
+        "keymaster-app:id",
+        "keymaster-app:publisher-public-key",
+        "keymaster-app:name",
+        "keymaster-app:description",
+        "keymaster-app:requirement",
+        "keymaster-app:identity-signature",
+      ].includes(name)
+    )
+      throw new KeymasterError(ERROR_CODES.METADATA_INVALID, `unknown app metadata: ${name}`);
+    const content = tag.attributes.get("content")?.value;
+    if (content !== undefined) values.set(name, [...(values.get(name) ?? []), content]);
+  }
+  const one = (name: string): string => {
+    const entries = values.get(name) ?? [];
+    if (entries.length !== 1 || !entries[0]!.trim())
+      throw new KeymasterError(ERROR_CODES.METADATA_INVALID, `${name} must appear exactly once`);
+    if (entries[0] !== entries[0]!.trim())
+      throw new KeymasterError(
+        ERROR_CODES.METADATA_INVALID,
+        `${name} must not have surrounding whitespace`,
+      );
+    return entries[0]!;
+  };
+  const requirement = values.get("keymaster-app:requirement") ?? [];
+  const signatureTags = identitySignatureTags(html);
+  if (signatureTags.length > 1)
+    throw new KeymasterError(
+      ERROR_CODES.IDENTITY_INVALID,
+      "identity signature meta must appear at most once",
+    );
+  if (signatureTags.length === 1 && !signatureTags[0]!.attributes.get("content")?.value)
+    throw new KeymasterError(ERROR_CODES.IDENTITY_INVALID, "identity signature meta content is empty");
+  return validateAppMetadata({
+    version: 1,
+    publisherPublicKey: one("keymaster-app:publisher-public-key"),
+    app: {
+      id: one("keymaster-app:id"),
+      name: one("keymaster-app:name"),
+      description: one("keymaster-app:description"),
+    },
+    requirements: requirement,
+  });
+}
+
+function identitySignatureTags(html: string): HtmlTag[] {
+  return findTags(html).filter(
+    (tag) =>
+      tag.name === "meta" &&
+      tag.attributes.get("name")?.value?.toLowerCase() === "keymaster-app:identity-signature",
   );
 }
 
-export function extractIdentityEncoded(html: string): string {
-  const matches = findTags(html).filter(isIdentityMeta);
+/** 从 HTML 读取并验证完整 identity proof；构建和运行时必须走此入口。 */
+export function extractAppIdentityProof(html: string): AppIdentityProofV1 {
+  const matches = identitySignatureTags(html);
   if (matches.length !== 1)
     throw new KeymasterError(
       ERROR_CODES.IDENTITY_INVALID,
-      "HTML must contain exactly one identity meta",
+      "HTML must contain exactly one identity signature meta",
     );
-  const encoded = matches[0]!.attributes.get("content")?.value;
-  if (!encoded)
-    throw new KeymasterError(ERROR_CODES.IDENTITY_INVALID, "identity meta content is empty");
-  return encoded;
-}
-
-export function extractIdentityProof(html: string): AppIdentityProofV1 {
-  return decodeIdentityProof(extractIdentityEncoded(html));
+  const signature = matches[0]!.attributes.get("content")?.value;
+  if (!signature)
+    throw new KeymasterError(ERROR_CODES.IDENTITY_INVALID, "identity signature meta content is empty");
+  const proof = validateIdentityProof({ ...extractAppMetadata(html), signature });
+  assertIdentityProof(proof);
+  return proof;
 }
 
 export function extractHtmlReferences(html: string): string[] {
@@ -135,21 +192,6 @@ export function extractHtmlReferences(html: string): string[] {
     }
   }
   return [...result];
-}
-
-export function injectIdentityMeta(html: string, proof: AppIdentityProofV1): string {
-  const encoded = encodeIdentityProof(proof);
-  const tags = findTags(html);
-  const existing = tags.filter(isIdentityMeta);
-  let output = html;
-  for (const tag of [...existing].reverse())
-    output = `${output.slice(0, tag.start)}${output.slice(tag.end)}`;
-  const meta = `<meta name="keymaster-app-identity" content="${encoded}">`;
-  const headClose = output.search(/<\/head\s*>/i);
-  if (headClose >= 0) return `${output.slice(0, headClose)}${meta}${output.slice(headClose)}`;
-  const bodyOpen = output.search(/<body(?:\s[^>]*)?>/i);
-  if (bodyOpen >= 0) return `${output.slice(0, bodyOpen)}${meta}${output.slice(bodyOpen)}`;
-  return `${meta}${output}`;
 }
 
 export function replaceHtmlReferences(

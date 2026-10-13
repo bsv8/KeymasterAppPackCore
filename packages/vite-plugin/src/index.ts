@@ -6,27 +6,23 @@ import type { Plugin, ResolvedConfig } from "vite";
 import {
   ERROR_CODES,
   KeymasterError,
-  assertIdentityProof,
   createBundleGraph,
   extractCssReferences,
+  extractAppIdentityProof,
   extractHtmlReferences,
-  injectIdentityMeta,
   jcs,
   manifestJson,
-  parseStrictJson,
   relativeLogicalPath,
   replaceCssReferences,
   replaceHtmlReferences,
   resolveRelativeLogicalPath,
   seedHashBytes,
   stableDependencyOrder,
-  validateIdentityProof,
   validateLogicalPath,
 } from "@keymaster-app-pack/core";
-import type { AppIdentityProofV1, KeymasterAppManifestV1 } from "@keymaster-app-pack/core";
+import type { AppMetadataV1, KeymasterAppManifestV1 } from "@keymaster-app-pack/core";
 
 export interface KeymasterViteOptions {
-  identity: AppIdentityProofV1 | string;
   entryLogicalPath?: string;
   strictExternal?: boolean;
   includeSourceMaps?: boolean;
@@ -63,10 +59,9 @@ interface OutputChunk {
 
 type OutputBundle = Record<string, OutputAsset | OutputChunk>;
 
-export function keymasterVite(options: KeymasterViteOptions): Plugin {
+export function keymasterVite(options: KeymasterViteOptions = {}): Plugin {
   const entryLogicalPath = options.entryLogicalPath ?? "index.html";
   let resolvedConfig: ResolvedConfig | undefined;
-  let identityPromise: Promise<AppIdentityProofV1> | undefined;
   let targetOutDir: string | undefined;
   let stagingOutDir: string | undefined;
   let buildFailed = false;
@@ -109,21 +104,6 @@ export function keymasterVite(options: KeymasterViteOptions): Plugin {
     },
   };
 
-  const loadIdentity = async (): Promise<AppIdentityProofV1> => {
-    if (!identityPromise) {
-      identityPromise =
-        typeof options.identity === "string"
-          ? import("node:fs/promises")
-              .then(({ readFile }) => readFile(options.identity as string, "utf8"))
-              .then(parseStrictJson)
-              .then(validateIdentityProof)
-          : Promise.resolve(validateIdentityProof(options.identity));
-    }
-    const identity = await identityPromise;
-    assertIdentityProof(identity);
-    return identity;
-  };
-
   return {
     name: "keymaster-app-pack",
     enforce: "post",
@@ -162,11 +142,7 @@ export function keymasterVite(options: KeymasterViteOptions): Plugin {
         await rm(stagingOutDir, { recursive: true, force: true });
       }
     },
-    async transformIndexHtml(html) {
-      return injectIdentityMeta(html, await loadIdentity());
-    },
     async generateBundle(_outputOptions, bundle) {
-      const identity = await loadIdentity();
       await init;
       const outputBundle = bundle as unknown as OutputBundle;
       const warnedMessages = new Set<string>();
@@ -223,14 +199,21 @@ export function keymasterVite(options: KeymasterViteOptions): Plugin {
           `entry not found: ${entryLogicalPath}`,
           { entryLogicalPath },
         );
+      const entryNode = transformed.get(entryLogicalPath);
+      if (!entryNode) throw new KeymasterError(ERROR_CODES.ENTRY_MISSING, `entry not found: ${entryLogicalPath}`);
+      const proof = extractAppIdentityProof(new TextDecoder().decode(entryNode));
+      const metadata: AppMetadataV1 = {
+        version: proof.version,
+        publisherPublicKey: proof.publisherPublicKey,
+        app: proof.app,
+        requirements: proof.requirements,
+      };
       const files = Object.fromEntries(
         [...hashes.entries()].sort(([a], [b]) => a.localeCompare(b)),
       );
       const manifest: KeymasterAppManifestV1 = {
-        version: 1,
-        publisherPublicKey: identity.publisherPublicKey,
-        app: identity.app,
-        identitySignature: identity.signature,
+        ...metadata,
+        identitySignature: proof.signature,
         index: entryHash,
         files,
         bundleSignature: "",
@@ -254,6 +237,11 @@ function collectNodes(
 ): Map<string, BundleNode> {
   const nodes = new Map<string, BundleNode>();
   for (const [fileName, output] of Object.entries(bundle)) {
+    if (fileName === ".keymaster.json" || fileName === "keymaster.app.json")
+      throw new KeymasterError(
+        ERROR_CODES.LOGICAL_PATH_INVALID,
+        `reserved output file: ${fileName}`,
+      );
     validateLogicalPath(fileName);
     if (fileName.endsWith(".map") && !options.includeSourceMaps)
       throw new KeymasterError(

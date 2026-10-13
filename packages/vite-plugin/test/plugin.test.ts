@@ -6,13 +6,8 @@ import { describe, expect, it } from "vitest";
 import { verifyDeployment } from "@keymaster-app-pack/core";
 import { keymasterVite } from "../src/index.js";
 
-const identity = {
-  version: 1 as const,
-  publisherPublicKey: "0284bf7562262bbd6940085748f3be6afa52ae317155181ece31b66351ccffa4b0",
-  app: { id: "vite-fixture", name: "Vite Fixture" },
-  signature:
-    "6b4f0ff133164bdbeba45981b0fb31bc94093b67b47f3dc28cf3b55b1105f26033068b93b5829240b12e6d0bd4ef061b7ff49faa1845a8c81887dc92f2c16fcf",
-};
+const metadataHtml =
+  '<meta name="keymaster-app:id" content="vite-fixture"><meta name="keymaster-app:publisher-public-key" content="0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"><meta name="keymaster-app:name" content="Vite Fixture"><meta name="keymaster-app:description" content="Fixture"><meta name="keymaster-app:requirement" content="storage"><meta name="keymaster-app:identity-signature" content="217a8c1761de074dc3c1e6e90f31f00b09f54ecb87d9ba2b1e157570033777c4373fc0281c76466ab20d04bc231b61a52ae3681c08e11f021ae6955718c1cb17">';
 
 describe("Vite adapter", () => {
   it("emits only MasterSeed-named files and an unsigned manifest", async () => {
@@ -20,7 +15,7 @@ describe("Vite adapter", () => {
     await mkdir(join(root, "src"));
     await writeFile(
       join(root, "index.html"),
-      '<!doctype html><html><head></head><body><script type="module" src="/src/main.js"></script></body></html>',
+      `<!doctype html><html><head>${metadataHtml}</head><body><script type="module" src="/src/main.js"></script></body></html>`,
     );
     await writeFile(
       join(root, "src/main.js"),
@@ -31,7 +26,7 @@ describe("Vite adapter", () => {
     await build({
       root,
       configFile: false,
-      plugins: [keymasterVite({ identity })],
+      plugins: [keymasterVite()],
       build: { outDir: "dist", sourcemap: false },
     });
     const record = await verifyDeployment(join(root, "dist"), { allowUnsigned: true });
@@ -45,13 +40,13 @@ describe("Vite adapter", () => {
     await mkdir(join(root, "src"));
     await writeFile(
       join(root, "index.html"),
-      '<!doctype html><html><head></head><body><script type="module" src="/src/main.js"></script></body></html>',
+      `<!doctype html><html><head>${metadataHtml}</head><body><script type="module" src="/src/main.js"></script></body></html>`,
     );
     await writeFile(join(root, "src/main.js"), "document.body.dataset.ready = 'yes';\n");
     await build({
       root,
       configFile: false,
-      plugins: [keymasterVite({ identity, includeSourceMaps: true })],
+      plugins: [keymasterVite({ includeSourceMaps: true })],
       build: { outDir: "dist", sourcemap: true },
     });
     const directory = join(root, "dist");
@@ -75,7 +70,7 @@ describe("Vite adapter", () => {
     await writeFile(join(directory, "old-release.txt"), "keep-me");
     await writeFile(
       join(root, "index.html"),
-      '<!doctype html><html><head></head><body><script type="module" src="/main.js"></script></body></html>',
+      `<!doctype html><html><head>${metadataHtml}</head><body><script type="module" src="/main.js"></script></body></html>`,
     );
     await writeFile(join(root, "main.js"), "document.body.dataset.ready = 'yes';");
     const failingPlugin = {
@@ -89,7 +84,7 @@ describe("Vite adapter", () => {
       build({
         root,
         configFile: false,
-        plugins: [keymasterVite({ identity, replaceExisting: true }), failingPlugin],
+        plugins: [keymasterVite({ replaceExisting: true }), failingPlugin],
         build: { outDir: "dist", sourcemap: false },
       }),
     ).rejects.toThrow("intentional late bundle failure");
@@ -104,14 +99,14 @@ describe("Vite adapter", () => {
     await writeFile(join(directory, "old-release.txt"), "keep-me");
     await writeFile(
       join(root, "index.html"),
-      '<!doctype html><html><head></head><body><script type="module" src="/main.js"></script></body></html>',
+      `<!doctype html><html><head>${metadataHtml}</head><body><script type="module" src="/main.js"></script></body></html>`,
     );
     await writeFile(join(root, "main.js"), "document.body.dataset.ready = 'yes';");
     await expect(
       build({
         root,
         configFile: false,
-        plugins: [keymasterVite({ identity })],
+        plugins: [keymasterVite()],
         build: { outDir: "dist", sourcemap: false },
       }),
     ).rejects.toThrow("target exists");
@@ -120,11 +115,42 @@ describe("Vite adapter", () => {
     await build({
       root,
       configFile: false,
-      plugins: [keymasterVite({ identity, replaceExisting: true })],
+      plugins: [keymasterVite({ replaceExisting: true })],
       build: { outDir: "dist", sourcemap: false },
     });
     await expect(readFile(join(directory, "old-release.txt"), "utf8")).rejects.toThrow();
     await expect(verifyDeployment(directory, { allowUnsigned: true })).resolves.toBeTruthy();
+  });
+
+  it("rejects reserved manifest names copied from publicDir", async () => {
+    for (const reserved of [".keymaster.json", "keymaster.app.json"]) {
+      const root = await mkdtemp(
+        join(tmpdir(), `keymaster-vite-public-${reserved.replaceAll(".", "-")}-`),
+      );
+      await mkdir(join(root, "public"));
+      await writeFile(join(root, "public", reserved), "pre-existing");
+      await writeFile(
+        join(root, "index.html"),
+        `<!doctype html><html><head>${metadataHtml}</head><body><script type="module" src="/main.js"></script></body></html>`,
+      );
+      await writeFile(join(root, "main.js"), "document.body.dataset.ready = 'yes';");
+      await expect(
+        build({
+          root,
+          configFile: false,
+          plugins: [
+            {
+              name: "pre-existing-reserved-input",
+              generateBundle() {
+                this.emitFile({ type: "asset", fileName: reserved, source: "pre-existing" });
+              },
+            },
+            keymasterVite(),
+          ],
+          build: { outDir: "dist", sourcemap: false },
+        }),
+      ).rejects.toThrow("reserved output file");
+    }
   });
 
   it("keeps the previous output when later write or close hooks fail", async () => {
@@ -135,7 +161,7 @@ describe("Vite adapter", () => {
       await writeFile(join(directory, "old-release.txt"), "keep-me");
       await writeFile(
         join(root, "index.html"),
-        '<!doctype html><html><head></head><body><script type="module" src="/main.js"></script></body></html>',
+        `<!doctype html><html><head>${metadataHtml}</head><body><script type="module" src="/main.js"></script></body></html>`,
       );
       await writeFile(join(root, "main.js"), "document.body.dataset.ready = 'yes';");
       const failingPlugin =
@@ -161,7 +187,7 @@ describe("Vite adapter", () => {
         build({
           root,
           configFile: false,
-          plugins: [keymasterVite({ identity, replaceExisting: true }), failingPlugin],
+          plugins: [keymasterVite({ replaceExisting: true }), failingPlugin],
           build: { outDir: "dist", sourcemap: false },
         }),
       ).rejects.toThrow(`intentional ${hook} failure`);
